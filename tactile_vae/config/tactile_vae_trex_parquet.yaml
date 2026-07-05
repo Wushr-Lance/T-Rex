@@ -1,0 +1,54 @@
+# Default full-run config for training the hand-wise tactile VAE on the
+# no-video T-Rex Hugging Face parquet download.
+
+paths:
+  data_root: /data/d3/shenrui/trex_dataset_no_videos
+  output_dir: /home/shenrui/egoscale2/T-Rex/tactile_vae/outputs
+  run_name: tactile_vae_trex_parquet_w64to16_attn_z256
+
+data:
+  data_format: parquet
+  lerobot_repo_id: zekaiwang/trex_dataset
+  source_window: 64
+  input_window: 16
+  subsample_stride: 4
+  stride: 4
+  val_ratio: 0.02
+  num_workers: 4
+
+model:
+  hidden_channels: 128
+  bottleneck_channels: 256
+  bottleneck_T: 4
+  latent_dim: 256
+  n_strided_blocks: 2
+  temporal_pool: attn
+  use_finger_embed: 1
+  use_time_embed: 1
+
+loss:
+  beta_kl: 1.0e-3
+  use_magnitude_weight: 1
+  weight_alpha: 2.0
+  weight_tau: 4.0
+
+train:
+  epochs: 30
+  batch_size: 256
+  lr: 3.0e-4
+  min_lr_ratio: 0.05
+  warmup_steps: 500
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  mixed_precision: bf16
+  seed: 42
+  max_steps: 0
+
+logging:
+  log_every: 50
+  val_every: 2000
+  save_every_epoch: 1
+  use_wandb: 1
+  wandb_project: trex_tactile_vae
+  wandb_entity: berkeley_bair
+  smoke_test: 0
