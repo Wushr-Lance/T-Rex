@@ -24,6 +24,7 @@ if _PARENT not in sys.path:
 from tactile_vae.data import (  # noqa: E402
     F6ChunkDataset,
     LeRobotF6ChunkDataset,
+    ParquetF6ChunkDataset,
     TacF6Stats,
     build_train_val_datasets,
 )
@@ -33,7 +34,7 @@ from tactile_vae.models import TactileVAE, TactileVAEConfig  # noqa: E402
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--data_root", type=str, required=True)
-    p.add_argument("--data_format", type=str, default="hdf5", choices=["hdf5", "lerobot"])
+    p.add_argument("--data_format", type=str, default="hdf5", choices=["hdf5", "lerobot", "parquet"])
     p.add_argument("--lerobot_repo_id", type=str, default="zekaiwang/trex_dataset")
     p.add_argument("--source_window", type=int, default=64)
     p.add_argument("--input_window", type=int, default=16)
@@ -146,7 +147,7 @@ def _build_loaders(args: argparse.Namespace):
             seed=args.seed,
             stats=stats,
         )
-    else:
+    elif args.data_format == "lerobot":
         ds = LeRobotF6ChunkDataset(
             root=args.data_root,
             repo_id=args.lerobot_repo_id,
@@ -164,6 +165,52 @@ def _build_loaders(args: argparse.Namespace):
         )
         train_ds.collate_fn = ds.collate_fn
         val_ds.collate_fn = ds.collate_fn
+    else:
+        stats = TacF6Stats.from_lerobot_root(args.data_root)
+        full_ds = ParquetF6ChunkDataset(
+            root=args.data_root,
+            source_window=args.source_window,
+            input_window=args.input_window,
+            subsample_stride=args.subsample_stride,
+            stride=args.stride,
+            stats=stats,
+        )
+        stats = full_ds.stats
+        ep_ids = [ep_id for ep_id, _, _ in full_ds._episodes]
+        rng = np.random.RandomState(args.seed)
+        perm = rng.permutation(len(ep_ids))
+        n_val_ep = max(1, int(round(len(ep_ids) * args.val_ratio))) if len(ep_ids) > 1 else 0
+        if n_val_ep > 0:
+            val_eps = [ep_ids[i] for i in sorted(perm[:n_val_ep].tolist())]
+            tr_eps = [ep_ids[i] for i in sorted(perm[n_val_ep:].tolist())]
+            train_ds = ParquetF6ChunkDataset(
+                root=args.data_root,
+                source_window=args.source_window,
+                input_window=args.input_window,
+                subsample_stride=args.subsample_stride,
+                stride=args.stride,
+                stats=stats,
+                episodes=tr_eps,
+            )
+            val_ds = ParquetF6ChunkDataset(
+                root=args.data_root,
+                source_window=args.source_window,
+                input_window=args.input_window,
+                subsample_stride=args.subsample_stride,
+                stride=args.stride,
+                stats=stats,
+                episodes=val_eps,
+            )
+        else:
+            n_val = max(1, int(round(len(full_ds) * args.val_ratio)))
+            n_train = len(full_ds) - n_val
+            train_ds, val_ds = random_split(
+                full_ds,
+                [n_train, n_val],
+                generator=torch.Generator().manual_seed(args.seed),
+            )
+            train_ds.collate_fn = full_ds.collate_fn
+            val_ds.collate_fn = full_ds.collate_fn
 
     train_loader = DataLoader(
         train_ds,
@@ -330,4 +377,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

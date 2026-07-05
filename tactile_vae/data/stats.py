@@ -58,17 +58,30 @@ class TacF6Stats:
     def from_lerobot_root(cls, root: str) -> Optional["TacF6Stats"]:
         """Load q01/q99 sidecar from a converted T-Rex LeRobot root if present."""
         sidecar = os.path.join(root, "meta", "trex_norm_stats.json")
-        if not os.path.isfile(sidecar):
-            return None
-        with open(sidecar, "r") as f:
-            payload = json.load(f)
-        block = payload[next(iter(payload))]["tactile_f6"]
-        return cls._checked(
-            np.array(block["q01"], dtype=np.float32),
-            np.array(block["q99"], dtype=np.float32),
-            np.array(block.get("mask", [True] * _F6_DIM), dtype=bool),
-            "trex_norm_stats",
-        )
+        if os.path.isfile(sidecar):
+            with open(sidecar, "r") as f:
+                payload = json.load(f)
+            block = payload[next(iter(payload))]["tactile_f6"]
+            return cls._checked(
+                np.array(block["q01"], dtype=np.float32),
+                np.array(block["q99"], dtype=np.float32),
+                np.array(block.get("mask", [True] * _F6_DIM), dtype=bool),
+                "trex_norm_stats",
+            )
+
+        stats_json = os.path.join(root, "meta", "stats.json")
+        if os.path.isfile(stats_json):
+            with open(stats_json, "r") as f:
+                payload = json.load(f)
+            block = payload.get("observation.tactile_force") or payload.get("observation.tactile_f6")
+            if block and "q01" in block and "q99" in block:
+                return cls._checked(
+                    np.array(block["q01"], dtype=np.float32),
+                    np.array(block["q99"], dtype=np.float32),
+                    np.ones(_F6_DIM, dtype=bool),
+                    "lerobot_stats_json",
+                )
+        return None
 
     @classmethod
     def from_samples(cls, samples: np.ndarray) -> "TacF6Stats":
@@ -156,4 +169,3 @@ class TacF6Stats:
             np.array(d["tacf6_mask"], dtype=bool),
             d.get("stats_source", "unknown"),
         )
-

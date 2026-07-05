@@ -96,7 +96,7 @@ class HandWiseTactileDecoder(nn.Module):
         B = z.shape[0]
         Fng = self.n_fingers
 
-        x = self.latent_to_tokens(z)
+        x = self.latent_to_tokens(z)                               # [B, 5 * bottleneck_channels * bottleneck_T]
         x = x.reshape(B, Fng, self.bottleneck_channels, self.bottleneck_T)
 
         if self.finger_embed is not None:
@@ -106,7 +106,7 @@ class HandWiseTactileDecoder(nn.Module):
             x = x + self.time_embed
 
         x = x.reshape(B * Fng, self.bottleneck_channels, self.bottleneck_T)
-        x = self.up_strided(x)
+        x = self.up_strided(x)                                     # [B*5, hidden, T]
         x = self.head(x)                                           # [B*5, 6, T]
 
         if x.shape[-1] != self.window:

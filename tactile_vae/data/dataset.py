@@ -261,6 +261,118 @@ class LeRobotF6ChunkDataset(Dataset):
     collate_fn = staticmethod(F6ChunkDataset.collate_fn)
 
 
+class ParquetF6ChunkDataset(Dataset):
+    """Local no-video LeRobot parquet fallback for sanity training.
+
+    Reads downloaded `data/**/*.parquet` files directly and builds the same
+    hand-wise [16, 5, 6] windows without relying on the `lerobot` package.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        source_window: int = 64,
+        input_window: int = 16,
+        subsample_stride: int = 4,
+        stride: int = 4,
+        stats: Optional[TacF6Stats] = None,
+        episodes: Optional[List[int]] = None,
+    ):
+        import pandas as pd
+
+        self.root = root
+        self.source_window = int(source_window)
+        self.input_window = int(input_window)
+        self.subsample_stride = int(subsample_stride)
+        self.stride = max(1, int(stride))
+        self.subsample_idx = _subsample_indices(
+            self.source_window, self.input_window, self.subsample_stride)
+        self.stats = stats if stats is not None else (TacF6Stats.from_lerobot_root(root) or self._stats_from_data())
+
+        files = sorted(glob.glob(os.path.join(root, "data", "**", "*.parquet"), recursive=True))
+        if not files:
+            raise FileNotFoundError(f"No parquet files under {root}/data")
+        frames = []
+        for path in files:
+            df = pd.read_parquet(path, columns=[
+                "observation.tactile_force",
+                "episode_index",
+                "frame_index",
+            ])
+            frames.append(df)
+        df = pd.concat(frames, ignore_index=True)
+        if episodes is not None:
+            df = df[df["episode_index"].isin(episodes)]
+        df = df.sort_values(["episode_index", "frame_index"]).reset_index(drop=True)
+
+        self._episodes: List[Tuple[int, np.ndarray, np.ndarray]] = []
+        for ep, group in df.groupby("episode_index", sort=True):
+            f6 = np.stack(group["observation.tactile_force"].to_numpy()).astype(np.float32)
+            f6 = _as_full_f6(f6)
+            frames_idx = group["frame_index"].to_numpy(dtype=np.int64)
+            if f6.shape[0] >= self.source_window:
+                self._episodes.append((int(ep), f6, frames_idx))
+        if not self._episodes:
+            raise RuntimeError(f"No episodes with at least {self.source_window} frames in {root}")
+
+        windows_per_ep = [
+            max(0, (f6.shape[0] - self.source_window) // self.stride + 1)
+            for _, f6, _ in self._episodes
+        ]
+        self._windows_per_ep = np.array(windows_per_ep, dtype=np.int64)
+        self._cum_windows = np.cumsum(self._windows_per_ep)
+        self._total_windows_per_hand = int(self._cum_windows[-1])
+        self._total = self._total_windows_per_hand * 2
+
+    def _stats_from_data(self, max_frames: int = 20000) -> TacF6Stats:
+        import pandas as pd
+
+        files = sorted(glob.glob(os.path.join(self.root, "data", "**", "*.parquet"), recursive=True))
+        samples = []
+        remaining = max_frames
+        for path in files:
+            df = pd.read_parquet(path, columns=["observation.tactile_force"])
+            take = min(len(df), remaining)
+            samples.append(np.stack(df["observation.tactile_force"].iloc[:take].to_numpy()))
+            remaining -= take
+            if remaining <= 0:
+                break
+        return TacF6Stats.from_samples(np.concatenate(samples, axis=0))
+
+    def __len__(self) -> int:
+        return self._total
+
+    @property
+    def num_episodes(self) -> int:
+        return len(self._episodes)
+
+    def _decode_idx(self, idx: int) -> Tuple[int, int, int]:
+        hand = idx // self._total_windows_per_hand
+        within = idx % self._total_windows_per_hand
+        ep_idx = int(np.searchsorted(self._cum_windows, within, side="right"))
+        prev = int(self._cum_windows[ep_idx - 1]) if ep_idx > 0 else 0
+        frame_start = (within - prev) * self.stride
+        return ep_idx, frame_start, hand
+
+    def __getitem__(self, idx: int) -> Dict:
+        ep_idx, frame_start, hand = self._decode_idx(idx)
+        ep_id, f6, frames_idx = self._episodes[ep_idx]
+        raw_chunk = f6[frame_start: frame_start + self.source_window]
+        raw_hand_64 = raw_chunk[:, hand * 5:(hand + 1) * 5, :]
+        raw_hand = raw_hand_64[self.subsample_idx]
+        f6_normed = self.stats.normalize_hand(raw_hand, hand).astype(np.float32, copy=False)
+        return {
+            "f6": torch.from_numpy(f6_normed),
+            "raw_f6": torch.from_numpy(raw_hand.astype(np.float32, copy=False)),
+            "magnitude": torch.tensor(float(np.linalg.norm(raw_hand)), dtype=torch.float32),
+            "ep_idx": int(ep_id),
+            "frame": int(frames_idx[frame_start]),
+            "hand": hand,
+        }
+
+    collate_fn = staticmethod(F6ChunkDataset.collate_fn)
+
+
 def build_train_val_datasets(
     data_root: str,
     source_window: int = 64,

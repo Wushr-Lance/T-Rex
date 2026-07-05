@@ -17,7 +17,7 @@ _PARENT = os.path.dirname(_THIS_DIR)
 if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
 
-from tactile_vae.data import TacF6Stats, build_train_val_datasets  # noqa: E402
+from tactile_vae.data import ParquetF6ChunkDataset, TacF6Stats, build_train_val_datasets  # noqa: E402
 from tactile_vae.models import TactileVAE, TactileVAEConfig  # noqa: E402
 
 
@@ -25,6 +25,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--data_root", required=True)
+    p.add_argument("--data_format", default="hdf5", choices=["hdf5", "parquet"])
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--max_batches", type=int, default=100)
@@ -43,14 +44,24 @@ def main():
     model.load_state_dict(state["model_state"])
     model.eval()
 
-    _, val_ds, _ = build_train_val_datasets(
-        data_root=args.data_root,
-        source_window=cfg.source_window,
-        input_window=cfg.input_window,
-        subsample_stride=cfg.subsample_stride,
-        stride=4,
-        stats=stats,
-    )
+    if args.data_format == "hdf5":
+        _, val_ds, _ = build_train_val_datasets(
+            data_root=args.data_root,
+            source_window=cfg.source_window,
+            input_window=cfg.input_window,
+            subsample_stride=cfg.subsample_stride,
+            stride=4,
+            stats=stats,
+        )
+    else:
+        val_ds = ParquetF6ChunkDataset(
+            root=args.data_root,
+            source_window=cfg.source_window,
+            input_window=cfg.input_window,
+            subsample_stride=cfg.subsample_stride,
+            stride=64,
+            stats=stats,
+        )
     loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
@@ -115,4 +126,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
