@@ -1,40 +1,26 @@
-# Hand-Wise Tactile VAE
+# Tactile VAE
 
-This folder is a standalone training codebase for a **hand-wise VAE-like
-tactile force encoder/decoder**. It is designed for T-Rex tactile F6 data and
-can be trained separately from the main VLA model.
+`tactile_vae/` is a standalone trainer for a hand-wise VAE over T-Rex tactile
+force windows. It is separate from the main VLA training code and learns a
+continuous latent representation for one hand of tactile F6 force/torque data.
 
-The model learns:
+The default training path uses the public T-Rex Hugging Face dataset in
+LeRobot parquet format, downloading only `meta/**` and `data/**`. Camera and
+tactile videos are not needed for this model.
 
-```text
-one hand tactile force window [16, 5, 6]
-    -> encoder
-mu, logvar [latent_dim]
-    -> sample or use mu
-z [latent_dim]
-    -> decoder
-reconstruction [16, 5, 6]
-```
+For an exact record of the first full run on this machine, including commands,
+logs, benchmark results, and W&B links, see [`TRAINING_LOG.md`](TRAINING_LOG.md).
 
-The final latent is **one vector per hand**, but the encoder and decoder are
-finger-aware internally.
+## Model
 
-## 1. What The Model Consumes
-
-T-Rex tactile force is stored per frame as:
-
-```text
-[10, 6]
-```
-
-where:
+T-Rex tactile force is stored per frame as `[10, 6]`:
 
 ```text
 10 = 2 hands x 5 fingers
 6  = Fx, Fy, Fz, Mx, My, Mz
 ```
 
-Training treats left and right hands as independent samples:
+Training treats the two hands as independent samples:
 
 ```text
 raw bimanual chunk: [64, 10, 6]
@@ -42,48 +28,59 @@ select one hand:    [64, 5, 6]
 subsample stride 4: [16, 5, 6]
 ```
 
-At 30 Hz, 64 raw frames cover about 2.13 seconds. The default model samples
-frames:
+The VAE learns:
 
 ```text
-[0, 4, 8, ..., 60]
+[B, 16, 5, 6]
+  -> encoder
+mu, logvar [B, latent_dim]
+  -> reparameterize or use mu
+z [B, latent_dim]
+  -> decoder
+reconstruction [B, 16, 5, 6]
 ```
 
-so the model input has 16 frames.
+The final latent is one vector per hand. The encoder and decoder are still
+finger-aware internally. Normalization follows T-Rex q01/q99 min-max scaling to
+`[-1, 1]`; left-hand samples use stats entries `0:30`, right-hand samples use
+entries `30:60`.
 
-Normalization follows T-Rex q01/q99 min-max normalization to `[-1, 1]`. For
-hand-wise samples, left hand uses stats entries `0:30`; right hand uses `30:60`.
+Training loss:
 
-## 2. Folder Layout
+```text
+total_loss = reconstruction_loss + beta_kl * KL(q(z|x) || N(0, I))
+```
+
+Default `beta_kl` is `1e-3`.
+
+## Layout
 
 ```text
 tactile_vae/
+├── config/
+│   └── tactile_vae_trex_parquet.yaml   default no-video T-Rex training config
 ├── data/
-│   ├── dataset.py       HDF5, LeRobot, and local parquet tactile loaders
-│   └── stats.py         T-Rex q01/q99 F6 normalization
+│   ├── dataset.py                      HDF5, LeRobot, and local parquet loaders
+│   └── stats.py                        T-Rex q01/q99 F6 normalization
 ├── models/
-│   ├── encoder.py       finger-aware hand-wise VAE encoder
-│   ├── decoder.py       finger-aware hand-wise decoder
-│   └── tactile_vae.py   VAE wrapper, config, losses
+│   ├── encoder.py                      finger-aware temporal encoder
+│   ├── decoder.py                      finger-aware temporal decoder
+│   └── tactile_vae.py                  VAE wrapper, config, and losses
 ├── scripts/
-│   ├── download_sanity_subset.py
-│   └── train_tactile_vae.sh
-├── train.py
-├── eval.py
+│   ├── download_sanity_subset.py        tiny per-episode no-video download helper
+│   └── train_tactile_vae.sh            accelerate launcher
+├── train.py                            main training entrypoint
+├── eval.py                             checkpoint evaluation
+├── TRAINING_LOG.md                     detailed local run record
 └── README.md
 ```
 
-## 3. Installation
+## Environment
 
 From the repository root:
 
 ```bash
 cd /path/to/T-Rex
-```
-
-Create the environment using the same dependency style as T-Rex:
-
-```bash
 conda create -n trex python=3.10 -y
 conda activate trex
 
@@ -93,57 +90,58 @@ pip install torch==2.6.0 torchvision==0.21.0 \
 pip install -e .
 ```
 
-Optional but recommended for the LeRobot path:
-
-```bash
-pip install -e /path/to/lerobot
-```
-
-Confirm the core packages:
+Verify the environment:
 
 ```bash
 python - <<'PY'
-import torch, h5py, numpy, pandas, pyarrow, accelerate, wandb
+import torch, h5py, numpy, pandas, pyarrow, accelerate, wandb, yaml
 print("torch:", torch.__version__)
 print("cuda available:", torch.cuda.is_available())
+print("cuda count:", torch.cuda.device_count())
 print("ok")
 PY
 ```
 
-If you only want to reproduce the local parquet sanity run, you need:
+The default launcher assumes the env is active. If it is not active, wrap
+commands with `conda run -n trex ...`.
 
-```text
-torch, numpy, pandas, pyarrow, huggingface_hub, accelerate, wandb
-```
+## Download The No-Video Dataset
 
-## 4. Quick Sanity Dataset Download
-
-The full T-Rex dataset is large, so start by downloading a small no-video subset.
-This pulls metadata plus trajectory parquet files containing tactile force, not
-camera/tactile videos.
+Download only metadata and trajectory parquet files:
 
 ```bash
-python tactile_vae/scripts/download_sanity_subset.py \
-  --repo_id zekaiwang/trex_dataset \
-  --cache_dir outputs/tactile_vae_sanity_data \
-  --episodes 0 \
-  --max_gb 0.2
+python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="zekaiwang/trex_dataset",
+    repo_type="dataset",
+    local_dir="/data/d3/shenrui/trex_dataset_no_videos",
+    allow_patterns=["meta/**", "data/**"],
+)
+PY
 ```
 
-Expected result:
+Expected local structure:
 
 ```text
-outputs/tactile_vae_sanity_data/
+/data/d3/shenrui/trex_dataset_no_videos/
 ├── data/**/*.parquet
 └── meta/
 ```
 
-Check that tactile force exists:
+Check that videos were not downloaded and tactile force exists:
 
 ```bash
+test ! -d /data/d3/shenrui/trex_dataset_no_videos/videos
+test -f /data/d3/shenrui/trex_dataset_no_videos/meta/info.json
+test -f /data/d3/shenrui/trex_dataset_no_videos/meta/stats.json
+find /data/d3/shenrui/trex_dataset_no_videos/data -name '*.parquet' | wc -l
+
 python - <<'PY'
 import pandas as pd
-p = "outputs/tactile_vae_sanity_data/data/chunk-000/file-000.parquet"
+
+p = "/data/d3/shenrui/trex_dataset_no_videos/data/chunk-000/file-000.parquet"
 df = pd.read_parquet(p)
 print(df.shape)
 print("observation.tactile_force" in df.columns)
@@ -151,194 +149,200 @@ print(df.iloc[0]["observation.tactile_force"].shape)
 PY
 ```
 
-You should see `observation.tactile_force` with shape `(60,)` per frame.
+`observation.tactile_force` should be present with shape `(60,)` per frame.
 
-## 5. Smoke Train On The Sanity Subset
+## Configuration
 
-Use the direct local parquet loader:
+The default full-run config is:
+
+```text
+tactile_vae/config/tactile_vae_trex_parquet.yaml
+```
+
+It contains these sections:
+
+```text
+paths      data root, output directory, run name
+data       parquet/HDF5 mode, window sizes, stride, workers, validation split
+model      latent/model dimensions and pooling options
+loss       KL weight and magnitude weighting
+train      epochs, batch size, LR, precision, seed, max_steps, sample_latent
+logging    W&B project/entity and logging cadence
+```
+
+Command-line flags override YAML values. For example:
 
 ```bash
-WANDB_MODE=offline \
-WANDB_DIR=outputs/wandb \
-WANDB_CACHE_DIR=outputs/wandb_cache \
-PYTHONPATH=$PWD \
 python -m tactile_vae.train \
-  --data_format parquet \
-  --data_root outputs/tactile_vae_sanity_data \
-  --output_dir outputs/tactile_vae_runs \
-  --run_name sanity_parquet_smoke \
-  --epochs 1 \
-  --batch_size 8 \
+  --config tactile_vae/config/tactile_vae_trex_parquet.yaml \
+  --batch_size 128 \
+  --max_steps 100 \
+  --use_wandb 0
+```
+
+Useful flags:
+
+```text
+--config PATH
+--data_root PATH
+--data_format parquet|hdf5|lerobot
+--output_dir PATH
+--run_name NAME
+--max_steps N
+--use_wandb 0|1
+--wandb_project trex_tactile_vae
+--wandb_entity berkeley_bair
+```
+
+The shell launcher intentionally passes only runtime overrides such as
+`RUN_NAME`, `OUTPUT_DIR`, and W&B settings. Training hyperparameters such as
+`batch_size`, `lr`, `epochs`, `max_steps`, `latent_dim`, and window/stride
+settings should be edited in the YAML config.
+
+`sample_latent: 1` uses VAE reparameterization during training:
+
+```text
+z = mu + eps * std
+```
+
+Set `sample_latent: 0` to train the decoder on deterministic `z = mu`. Validation
+already uses deterministic `z = mu`.
+
+## Smoke Test
+
+Run a small non-W&B check on the downloaded parquet data:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python -m tactile_vae.train \
+  --config tactile_vae/config/tactile_vae_trex_parquet.yaml \
+  --run_name smoke_real_parquet \
+  --output_dir /home/shenrui/egoscale2/T-Rex/tactile_vae/outputs \
+  --use_wandb 0 \
+  --max_steps 1 \
   --num_workers 0 \
-  --latent_dim 64 \
+  --batch_size 8 \
   --hidden_channels 32 \
   --bottleneck_channels 64 \
-  --bottleneck_T 4 \
-  --temporal_pool attn \
-  --use_finger_embed 1 \
-  --val_ratio 0.2 \
-  --stride 64 \
-  --log_every 1 \
-  --val_every 2 \
-  --use_wandb 1 \
+  --latent_dim 64 \
   --mixed_precision no \
-  --smoke_test 1
+  --log_every 1
 ```
 
-This is intentionally tiny and CPU-friendly. It verifies:
-
-- dataset loading
-- `[64, 10, 6] -> [16, 5, 6]` chunking
-- q01/q99 normalization
-- encoder/decoder shape flow
-- VAE losses
-- checkpoint writing
-- W&B offline logging
-
-Expected checkpoint:
+Expected output includes:
 
 ```text
-outputs/tactile_vae_runs/sanity_parquet_smoke/latest.pt
+data_format = parquet
+train windows=... val windows=... stats_source=lerobot_stats_json
+[step       0 | ep  0] loss=...
+saved checkpoint -> .../checkpoint_epoch000.pt
 ```
 
-If W&B is offline, sync later with:
+## Full Training
+
+Use the launcher for normal training:
 
 ```bash
-wandb sync outputs/wandb/wandb/offline-run-*
-```
-
-## 6. Full Training On Merged T-Rex HDF5 Data
-
-The full training path follows the same layout as the existing tactile VQ-VAE:
-
-```text
-DATA_ROOT/
-  split_or_source_name/
-    pretrain_manifest.json
-  episode_dir/
-    pretrain.hdf5
-      tactile_f6: [N, 10, 6]
-```
-
-The manifest must include tactile q01/q99 statistics under:
-
-```text
-statistics.tactile_f6.q01
-statistics.tactile_f6.q99
-```
-
-Run with the shell launcher:
-
-```bash
-DATA_ROOT=/path/to/merged_midtrain_root \
-OUTPUT_DIR=outputs/tactile_vae \
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
+CUDA_VISIBLE_DEVICES=0,1 \
 USE_WANDB=1 \
-WANDB_API_KEY=... \
+WANDB_MODE=online \
+WANDB_ENTITY=berkeley_bair \
+WANDB_PROJECT=trex_tactile_vae \
+RUN_NAME=tactile_vae_trex_parquet_2gpu \
+OUTPUT_DIR=/home/shenrui/egoscale2/T-Rex/tactile_vae/outputs \
+TRITON_CACHE_DIR=/data/d3/shenrui/triton_cache \
 bash tactile_vae/scripts/train_tactile_vae.sh
 ```
 
-Useful overrides:
+If the conda env is not active:
 
 ```bash
-TEMPORAL_POOL=flatten_mlp \
-USE_FINGER_EMBED=0 \
-LATENT=128 \
-BATCH=128 \
-EPOCHS=10 \
-LR=3e-4 \
-DATA_ROOT=/path/to/merged_midtrain_root \
-OUTPUT_DIR=outputs/tactile_vae \
-bash tactile_vae/scripts/train_tactile_vae.sh
+CUDA_VISIBLE_DEVICES=0,1 \
+USE_WANDB=1 \
+WANDB_MODE=online \
+WANDB_ENTITY=berkeley_bair \
+WANDB_PROJECT=trex_tactile_vae \
+RUN_NAME=tactile_vae_trex_parquet_2gpu \
+OUTPUT_DIR=/home/shenrui/egoscale2/T-Rex/tactile_vae/outputs \
+TRITON_CACHE_DIR=/data/d3/shenrui/triton_cache \
+conda run -n trex bash tactile_vae/scripts/train_tactile_vae.sh
 ```
 
-The launcher uses:
+The launcher mirrors stdout/stderr to:
 
 ```text
-SOURCE_WINDOW=64
-INPUT_WINDOW=16
-SUBSAMPLE_STRIDE=4
-STRIDE=4
-TEMPORAL_POOL=attn
-USE_FINGER_EMBED=1
-LATENT=256
-BATCH=256
-EPOCHS=30
-LR=3e-4
+<OUTPUT_DIR>/logs/<RUN_NAME>_<timestamp>.log
 ```
 
-For full training, `STRIDE=4` gives many overlapping 64-frame chunks. Increase
-it, for example to `STRIDE=16` or `STRIDE=64`, if you want faster but less dense
-training.
-
-## 7. Direct Python Training Command
-
-Equivalent HDF5 training without the shell script:
+For a persistent detached run:
 
 ```bash
-PYTHONPATH=$PWD accelerate launch \
-  --num_processes 1 \
-  --mixed_precision bf16 \
-  -m tactile_vae.train \
-  --data_format hdf5 \
-  --data_root /path/to/merged_midtrain_root \
-  --output_dir outputs/tactile_vae \
-  --run_name tactile_vae_full \
-  --source_window 64 \
-  --input_window 16 \
-  --subsample_stride 4 \
-  --stride 4 \
-  --temporal_pool attn \
-  --use_finger_embed 1 \
-  --latent_dim 256 \
-  --hidden_channels 128 \
-  --bottleneck_channels 256 \
-  --bottleneck_T 4 \
-  --epochs 30 \
-  --batch_size 256 \
-  --lr 3e-4 \
-  --num_workers 4 \
-  --val_every 2000 \
-  --use_wandb 1
+tmux new-session -d -s tactile_vae_train \
+  "cd /home/shenrui/egoscale2/T-Rex; \
+   CUDA_VISIBLE_DEVICES=0,1 \
+   USE_WANDB=1 \
+   WANDB_MODE=online \
+   WANDB_ENTITY=berkeley_bair \
+   WANDB_PROJECT=trex_tactile_vae \
+   RUN_NAME=tactile_vae_trex_parquet_2gpu \
+   OUTPUT_DIR=/home/shenrui/egoscale2/T-Rex/tactile_vae/outputs \
+   TRITON_CACHE_DIR=/data/d3/shenrui/triton_cache \
+   conda run --no-capture-output -n trex bash tactile_vae/scripts/train_tactile_vae.sh"
 ```
 
-For CPU-only debugging, use:
+Monitor:
 
 ```bash
-python -m tactile_vae.train \
-  --data_format parquet \
-  --data_root outputs/tactile_vae_sanity_data \
-  --output_dir /tmp/tactile_vae_debug \
-  --mixed_precision no \
-  --num_workers 0 \
-  --batch_size 4 \
-  --smoke_test 1
+tmux attach -t tactile_vae_train
+tail -f /home/shenrui/egoscale2/T-Rex/tactile_vae/outputs/logs/<RUN_NAME>_<timestamp>.log
 ```
 
-## 8. Evaluation
+## Benchmark Before Choosing GPU Count
 
-Evaluate a checkpoint on HDF5 data:
+This model is small, so benchmark before using many GPUs:
+
+```bash
+cp tactile_vae/config/tactile_vae_trex_parquet.yaml /tmp/tactile_vae_bench.yaml
+python - <<'PY'
+from pathlib import Path
+
+p = Path("/tmp/tactile_vae_bench.yaml")
+s = p.read_text()
+s = s.replace("max_steps: 0", "max_steps: 100")
+p.write_text(s)
+PY
+
+CUDA_VISIBLE_DEVICES=0 \
+USE_WANDB=0 \
+CONFIG=/tmp/tactile_vae_bench.yaml \
+RUN_NAME=bench_1gpu_100 \
+OUTPUT_DIR=/home/shenrui/egoscale2/T-Rex/tactile_vae/outputs \
+conda run -n trex bash tactile_vae/scripts/train_tactile_vae.sh
+
+CUDA_VISIBLE_DEVICES=0,1 \
+USE_WANDB=0 \
+CONFIG=/tmp/tactile_vae_bench.yaml \
+RUN_NAME=bench_2gpu_100 \
+OUTPUT_DIR=/home/shenrui/egoscale2/T-Rex/tactile_vae/outputs \
+conda run -n trex bash tactile_vae/scripts/train_tactile_vae.sh
+```
+
+Use 1 GPU if it is fast enough or if 2 GPUs improve throughput by less than
+about `1.3x`. In the recorded local run, 2 GPUs were used because they achieved
+about `1.77x` the 1-GPU throughput.
+
+## Evaluation
+
+Evaluate a parquet-trained checkpoint:
 
 ```bash
 python -m tactile_vae.eval \
-  --data_format hdf5 \
-  --checkpoint outputs/tactile_vae/<run_name>/latest.pt \
-  --data_root /path/to/merged_midtrain_root \
+  --data_format parquet \
+  --checkpoint /home/shenrui/egoscale2/T-Rex/tactile_vae/outputs/<run_name>/latest.pt \
+  --data_root /data/d3/shenrui/trex_dataset_no_videos \
   --batch_size 256 \
   --max_batches 100 \
-  --exemplars outputs/tactile_vae/<run_name>/eval_exemplars.npz
-```
-
-Evaluate a sanity parquet checkpoint:
-
-```bash
-python -m tactile_vae.eval \
-  --data_format parquet \
-  --checkpoint outputs/tactile_vae_runs/sanity_parquet_smoke/latest.pt \
-  --data_root outputs/tactile_vae_sanity_data \
-  --batch_size 16 \
-  --max_batches 10 \
-  --exemplars outputs/tactile_vae_runs/sanity_parquet_smoke/eval_exemplars.npz
+  --exemplars /home/shenrui/egoscale2/T-Rex/tactile_vae/outputs/<run_name>/eval_exemplars.npz
 ```
 
 The eval summary reports:
@@ -352,7 +356,7 @@ mu_std         latent mean standard deviation
 recon_mag_q*   reconstruction MSE by raw-force magnitude quartile
 ```
 
-## 9. Checkpoint Format
+## Checkpoints
 
 Each checkpoint contains:
 
@@ -382,146 +386,56 @@ model.load_state_dict(ckpt["model_state"])
 model.eval()
 ```
 
-Use the encoder as a deterministic hand-wise tactile representation:
+Use the encoder deterministically:
 
 ```python
 with torch.no_grad():
     mu, logvar = model.encode(f6_normed)  # f6_normed: [B, 16, 5, 6]
-    z = mu                                # recommended deterministic export
+    z = mu
 ```
 
-Decode:
+`f6_normed` must use the saved q01/q99 stats from the checkpoint.
 
-```python
-with torch.no_grad():
-    recon = model.decode(z)               # [B, 16, 5, 6]
-```
-
-If another codebase only needs the encoder:
-
-```python
-model.encoder.load_state_dict(ckpt["encoder_state"])
-```
-
-Remember to apply the saved T-Rex q01/q99 stats before encoding.
-
-## 10. Architecture Summary
-
-Encoder:
-
-```text
-[B, 16, 5, 6]
-  -> treat each finger as batch
-[B*5, 6, 16]
-  -> shared temporal Conv1d stack
-[B*5, bottleneck, 4]
-  -> temporal_pool={attn, flatten_mlp}
-[B*5, bottleneck]
-  -> restore fingers
-[B, 5, bottleneck]
-  -> finger attention pooling
-[B, bottleneck]
-  -> mu/logvar heads
-[B, latent_dim], [B, latent_dim]
-```
-
-Decoder:
-
-```text
-z [B, latent_dim]
-  -> learned latent_to_tokens
-[B, 5, bottleneck, 4]
-  -> add optional finger/time embeddings
-  -> shared ConvTranspose1d decoder per finger
-[B*5, 6, 16]
-  -> reshape
-[B, 16, 5, 6]
-```
-
-Training loss:
-
-```text
-total_loss = reconstruction_loss + beta_kl * KL(q(z|x) || N(0, I))
-```
-
-Default:
-
-```text
-beta_kl = 1e-3
-```
-
-## 11. Important Configs
-
-Data:
-
-```text
---source_window 64       raw frames per chunk
---input_window 16        frames after subsampling
---subsample_stride 4     64 -> 16
---stride 4               chunk-start stride inside an episode
-```
-
-Model:
-
-```text
---latent_dim 256
---hidden_channels 128
---bottleneck_channels 256
---bottleneck_T 4
---temporal_pool attn | flatten_mlp
---use_finger_embed 0 | 1
---use_time_embed 0 | 1
-```
-
-Loss:
-
-```text
---beta_kl 1e-3
---use_magnitude_weight 0 | 1
---weight_alpha 2.0
---weight_tau 4.0
-```
-
-Logging:
-
-```text
---use_wandb 1
---wandb_project trex_tactile_vae
-```
-
-## 12. Troubleshooting
+## Troubleshooting
 
 **`No pretrain_manifest.json`**
 
-You are using `--data_format hdf5` on a LeRobot/parquet root. Use:
+You are using `--data_format hdf5` on a parquet root. Use:
 
 ```bash
 --data_format parquet
 ```
 
-for the sanity subset downloaded by `download_sanity_subset.py`.
+or use `tactile_vae/config/tactile_vae_trex_parquet.yaml`.
 
-**LeRobot tries to contact Hugging Face after local download**
+**`accelerate: command not found`**
 
-Use the direct parquet loader:
+The conda env is not active. Either activate it:
 
 ```bash
---data_format parquet
+conda activate trex
 ```
 
-This avoids LeRobot metadata compatibility issues and reads local parquet files
-directly.
-
-**W&B cannot open sockets in a restricted environment**
-
-Run training outside the sandbox, or use offline mode with W&B directories inside
-the workspace:
+or run the launcher through:
 
 ```bash
-WANDB_MODE=offline \
-WANDB_DIR=outputs/wandb \
-WANDB_CACHE_DIR=outputs/wandb_cache \
-python -m tactile_vae.train ...
+conda run -n trex bash tactile_vae/scripts/train_tactile_vae.sh
+```
+
+**W&B logs offline**
+
+Set:
+
+```bash
+USE_WANDB=1
+WANDB_MODE=online
+WANDB_ENTITY=berkeley_bair
+```
+
+Confirm auth:
+
+```bash
+wandb login --verify
 ```
 
 **CUDA is not visible**
@@ -536,11 +450,7 @@ print(torch.cuda.device_count())
 PY
 ```
 
-If this prints `False`, the code still runs on CPU for smoke tests, but full
-training should be run in a GPU-visible environment.
-
 **Loss is finite but not improving in a smoke test**
 
-That is normal. `--smoke_test 1` only runs five optimizer steps. Use it only to
-validate wiring. Real training needs more epochs and a larger dataset.
-
+That is expected. Smoke tests are only wiring checks. Use the full dataset and
+more steps for real training.

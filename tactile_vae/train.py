@@ -64,6 +64,7 @@ _DEFAULTS = {
     "mixed_precision": "bf16",
     "seed": 42,
     "max_steps": 0,
+    "sample_latent": 1,
     "log_every": 50,
     "val_every": 2000,
     "save_every_epoch": 1,
@@ -107,6 +108,7 @@ _CONFIG_KEYS = {
         "mixed_precision",
         "seed",
         "max_steps",
+        "sample_latent",
     ),
     "logging": (
         "log_every",
@@ -179,6 +181,7 @@ def _build_arg_parser(defaults: Dict) -> argparse.ArgumentParser:
     p.add_argument("--mixed_precision", type=str, default=defaults["mixed_precision"], choices=["no", "fp16", "bf16"])
     p.add_argument("--seed", type=int, default=defaults["seed"])
     p.add_argument("--max_steps", type=int, default=defaults["max_steps"])
+    p.add_argument("--sample_latent", type=int, default=defaults["sample_latent"])
 
     p.add_argument("--log_every", type=int, default=defaults["log_every"])
     p.add_argument("--val_every", type=int, default=defaults["val_every"])
@@ -455,7 +458,7 @@ def main():
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_now
             optimizer.zero_grad(set_to_none=True)
-            out = model(batch["f6"], batch["magnitude"], sample=True)
+            out = model(batch["f6"], batch["magnitude"], sample=bool(args.sample_latent))
             accelerator.backward(out["total_loss"])
             if args.grad_clip > 0:
                 accelerator.clip_grad_norm_(model.parameters(), args.grad_clip)

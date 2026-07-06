@@ -39,6 +39,7 @@ train:
   batch_size: 16
   lr: 0.001
   max_steps: 7
+  sample_latent: 0
 logging:
   log_every: 3
   use_wandb: 1
@@ -55,6 +56,8 @@ logging:
                     "4",
                     "--use_wandb",
                     "0",
+                    "--sample_latent",
+                    "1",
                 ]
             )
 
@@ -73,6 +76,7 @@ logging:
         self.assertEqual(args.epochs, 2)
         self.assertEqual(args.batch_size, 4)
         self.assertEqual(args.max_steps, 7)
+        self.assertEqual(args.sample_latent, 1)
         self.assertEqual(args.use_wandb, 0)
         self.assertEqual(args.wandb_project, "custom_project")
         self.assertEqual(args.wandb_entity, "berkeley_bair")

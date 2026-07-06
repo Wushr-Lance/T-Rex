@@ -43,6 +43,7 @@ train:
   mixed_precision: bf16
   seed: 42
   max_steps: 0
+  sample_latent: 1
 
 logging:
   log_every: 50
