@@ -4,6 +4,7 @@ from .dataset import (
     ParquetF6ChunkDataset,
     build_train_val_datasets,
 )
+from . import filtering
 from .stats import TacF6Stats
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "ParquetF6ChunkDataset",
     "TacF6Stats",
     "build_train_val_datasets",
+    "filtering",
 ]
